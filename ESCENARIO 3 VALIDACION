@@ -1,0 +1,111 @@
+from pyomo.environ import *
+from pyomo.opt import SolverFactory
+import pandas as pd
+
+#Creacion del modelo
+model = ConcreteModel()
+
+#Reading the data escenario #1 con un 0.25% mas caro el valor del costo de fabricar un componente (CS_cv)
+L_cv_data = pd.read_excel(r"/Users/hecto/OneDrive/Escritorio/ING/CICLO 2 2024/IDN/TEO/PROYECTO/DATA E1.xlsx", sheet_name = "L_cv", index_col = [0,1])
+CS_cv_data = pd.read_excel(r"/Users/hecto/OneDrive/Escritorio/ING/CICLO 2 2024/IDN/TEO/PROYECTO/DATA E1.xlsx", sheet_name = "CS_cv", index_col = [0,1])
+STC_cvp_data = pd.read_excel(r"/Users/hecto/OneDrive/Escritorio/ING/CICLO 2 2024/IDN/TEO/PROYECTO/DATA E1.xlsx", sheet_name = "STC_cvp", index_col = [0,1,2])
+U_p_data = pd.read_excel(r"/Users/hecto/OneDrive/Escritorio/ING/CICLO 2 2024/IDN/TEO/PROYECTO/DATA E1.xlsx", sheet_name = "U_p", index_col = [0])
+Lab_p_data = pd.read_excel(r"/Users/hecto/OneDrive/Escritorio/ING/CICLO 2 2024/IDN/TEO/PROYECTO/DATA E1.xlsx", sheet_name = "Lab_p", index_col = [0])
+MC_p_data = pd.read_excel(r"/Users/hecto/OneDrive/Escritorio/ING/CICLO 2 2024/IDN/TEO/PROYECTO/DATA E1.xlsx", sheet_name = "MC_p", index_col = [0])
+PTC_pd_data = pd.read_excel(r"/Users/hecto/OneDrive/Escritorio/ING/CICLO 2 2024/IDN/TEO/PROYECTO/DATA E1.xlsx", sheet_name = "PTC_pd", index_col = [0,1])
+SP_d_data = pd.read_excel(r"/Users/hecto/OneDrive/Escritorio/ING/CICLO 2 2024/IDN/TEO/PROYECTO/DATA E1.xlsx", sheet_name = "SP_d", index_col = [0])
+D_d_data = pd.read_excel(r"/Users/hecto/OneDrive/Escritorio/ING/CICLO 2 2024/IDN/TEO/PROYECTO/DATA E1.xlsx", sheet_name = "D_d", index_col = [0])
+
+#data for sets
+components = {1, 2, 3}  # 3 componentes
+vendors = {1, 2, 3}     # 3 proveedores
+plants = {1, 2}         # 2 plantas
+distribution_centers = {1, 2, 3, 4, 5, 6}  # 6 centros de distribución
+
+model.C = Set(initialize=components)
+model.V = Set(initialize=vendors)
+model.P = Set(initialize=plants)
+model.D = Set(initialize=distribution_centers)
+
+#Definicion de variables
+model.X_cvp = Var(model.C, model.V, model.P, within=NonNegativeReals, doc="Cantidad de componentes enviados del proveedor a la planta")
+model.Y_pd = Var(model.P, model.D, within=NonNegativeReals, doc="Cantidad de productos enviados de la planta al centro de distribución")
+
+# Parámetros
+model.L_cv = Param(model.C, model.V, initialize=L_cv_data['L_cv'].to_dict(), default=0)
+model.CS_cv = Param(model.C, model.V, initialize=CS_cv_data['CS_cv'].to_dict(), default=0)
+model.STC_cvp = Param(model.C, model.V, model.P, initialize=STC_cvp_data['STC_cvp'].to_dict(), default=0)
+model.U_p = Param(model.P, initialize=U_p_data['U_p'].to_dict(), default=0)
+model.Lab_p = Param(model.P, initialize=Lab_p_data['Lab_p'].to_dict(), default=0)
+model.MC_p = Param(model.P, initialize=MC_p_data['MC_p'].to_dict(), default=0)
+model.PTC_pd = Param(model.P, model.D, initialize=PTC_pd_data['PTC_pd'].to_dict(), default=0)
+model.SP_d = Param(model.D, initialize=SP_d_data['SP_d'].to_dict(), default=0)
+model.D_d = Param(model.D, initialize=D_d_data['D_d'].to_dict(), default=0)
+
+#Definicion de funcion objetivo
+#Defininimos TSMC
+def total_supplier_material_cost(model):
+    return sum(model.CS_cv[c, v] * model.X_cvp[c, v, p] for c in model.C for v in model.V for p in model.P)
+#definimos el TMC
+def total_manufacturing_cost(model):
+    # Costo de manufactura
+    manufacturing_cost = sum(model.MC_p[p] * sum(model.Y_pd[p, d] for d in model.D) for p in model.P)
+    return manufacturing_cost
+#definimos el TTC
+def total_transportation_cost(model):
+    #costo de transporte de un componente 
+    transportcomp_cost = sum(model.X_cvp[c, v, p] * model.STC_cvp[c, v, p] for c in model.C for v in model.V for p in model.P)
+    #Costo de transporte de planta a centro de distribucion
+    transportplant_cost = sum(model.Y_pd[p, d] * model.PTC_pd[p, d] for p in model.P for d in model.D)
+    return transportcomp_cost + transportplant_cost
+#Definimos la funcion objetivo
+def total_supply_chain_cost(model):
+    return total_supplier_material_cost(model) + total_manufacturing_cost(model) + total_transportation_cost(model)
+
+model.TSCC = Objective(rule=total_supply_chain_cost, sense=minimize)
+
+#restricciones del modelo
+#R1: VENDOR CAPACITY CONSTRAINT
+def capacity_constraint_v(model, c, v):
+    return sum(model.X_cvp[c, v, p] for p in model.P) <= model.L_cv[c, v]
+model.capacity_constraint_v = Constraint(model.C, model.V, rule=capacity_constraint_v)
+
+#R2: PLANT CAPACITY CONSTRAINT
+def capacity_constraint_p(model, p):
+    return sum(model.Y_pd[p, d] for d in model.D) <= model.U_p[p]
+model.capacity_constraint_p = Constraint(model.P, rule=capacity_constraint_p)
+
+#R3: DEMAND CONSTRAINT
+# Restricción 3: demanda en los centros de distribución
+def demand_constraint_d(model, d):
+    return sum(model.Y_pd[p, d] for p in model.P) >= model.D_d[d]
+model.demand_constraint_d = Constraint(model.D, rule=demand_constraint_d)
+
+#R4: PRODUCT FLOW CONSTRAINT
+def balance_constraint(model, c, p):
+    return sum(model.X_cvp[c, v, p] for v in model.V) - sum(model.Y_pd[p, d] for d in model.D) >= 0
+model.balance_constraint = Constraint(model.C, model.P, rule=balance_constraint)
+
+# Resolver el modelo
+opt = SolverFactory('glpk')
+results = opt.solve(model)
+results.write()
+# Mostrar resultados más claros
+print("\n--- Resultados ---")
+print(f"Costo total del sistema (TSCC): {model.TSCC()}")
+
+# Mostrar las decisiones de envío del proveedor a la planta
+print("\nCantidad enviada de proveedor a planta (X):")
+for c in model.C:
+    for v in model.V:
+        for p in model.P:
+            if model.X_cvp[c, v, p]() > 0:
+                print(f"Componente {c}, Proveedor {v}, Planta {p}: {model.X_cvp[c, v, p]()}")
+
+# Mostrar las decisiones de envío de planta a centro de distribución
+print("\nCantidad enviada de planta a centro de distribución (Y):")
+for p in model.P:
+    for d in model.D:
+        if model.Y_pd[p, d]() > 0:
+            print(f"Planta {p}, Centro de Distribución {d}: {model.Y_pd[p, d]()}")
+print("\n") 
